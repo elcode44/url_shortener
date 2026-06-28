@@ -1,21 +1,15 @@
 # app/cache.py
-from cachetools import TTLCache
+import redis
+import os
 
-# Holds up to 1000 entries, each expires after 1 hour (3600 seconds)
-cache = TTLCache(maxsize=1000, ttl=3600)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+r = redis.from_url(REDIS_URL, decode_responses=True)
 
 def get_from_cache(key: str) -> str | None:
-    """Return the cached value, or None if missing/expired"""
-    return cache.get(key)
+    return r.get(key)
 
-def set_in_cache(key: str, value: str) -> None:
-    """Store a value in the cache"""
-    cache[key] = value
+def set_in_cache(key: str, value: str, ttl: int = 3600) -> None:
+    r.set(key, value, ex=ttl)
 
 def remove_from_cache(key: str) -> None:
-    """Remove a key from the cache (e.g. if the URL is deleted from DB)"""
-    cache.pop(key, None)
-
-def cache_size() -> int:
-    """Useful for debugging / admin endpoint"""
-    return len(cache)
+    r.delete(key)

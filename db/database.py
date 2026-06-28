@@ -1,5 +1,5 @@
-# db/database.py
 import os
+import time
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
@@ -11,9 +11,18 @@ load_dotenv()
 
 class Database:
     def __init__(self):
-        self.conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+        self.conn = self._connect_with_retry()
         self.conn.autocommit = True
         self._create_table()
+
+    def _connect_with_retry(self, retries=5, delay=2):
+        for attempt in range(retries):
+            try:
+                return psycopg2.connect(os.getenv("DATABASE_URL"))
+            except psycopg2.OperationalError as e:
+                print(f"DB connection failed (attempt {attempt + 1}/{retries}), retrying in {delay}s...")
+                time.sleep(delay)
+        raise Exception("Could not connect to database after retries")
 
     def _create_table(self):
         with self.conn.cursor() as cur:
