@@ -1,28 +1,21 @@
-import hashlib
-import base64
 from app.cache import get_from_cache, set_in_cache
+from app.id_allocator import RangeAllocator
+
+_allocator: RangeAllocator | None = None
 
 
-def generate_short_code(long_url: str) -> str:
-    hash_bytes = hashlib.md5(long_url.encode()).digest()
-    return base64.urlsafe_b64encode(hash_bytes)[:6].decode()
+def init_allocator(db, block_size: int = 1000):
+    """Call once at startup, after the Database is constructed."""
+    global _allocator
+    _allocator = RangeAllocator(db, block_size)
 
 
 def shorten(long_url: str, db) -> str:
-    short_code = generate_short_code(long_url)
+    if _allocator is None:
+        raise RuntimeError("Allocator not initialized — call init_allocator(db) at startup")
 
-    cached = get_from_cache(short_code)
-    if cached:
-        return short_code
-
-    existing = db.find_url(short_code)
-    if not existing:
-        db.save_url(short_code, long_url)
-    elif existing.long_url != long_url:
-        raise ValueError(
-            f"Short code '{short_code}' already maps to a different URL"
-        )
-
+    short_code = _allocator.next_short_code()
+    db.save_url(short_code, long_url)
     set_in_cache(short_code, long_url)
     return short_code
 
