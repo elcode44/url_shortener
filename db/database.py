@@ -122,6 +122,7 @@ class Database:
                     return None
                 return URLRecord(**row)
 
+<<<<<<< HEAD
     def flush_hit_counts(self, counts: dict[str, int]) -> int:
         """Batch-apply buffered hit counts. counts = {short_code: increment}."""
         if not counts:
@@ -140,6 +141,23 @@ class Database:
                     values,
                 )
                 return cur.rowcount
+=======
+    def get_url(self, short_code: str) -> Optional[URLRecord]:
+        with self._get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    UPDATE urls
+                    SET hit_count = hit_count + 1
+                    WHERE short_code = %s
+                    RETURNING *;
+                """, (short_code,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                if row["expires_at"] and row["expires_at"] < datetime.utcnow():
+                    return None
+                return URLRecord(**row)
+>>>>>>> 2d337427932f0bf8116b59d3e4ce04d253e73d20
 
     def get_all(self) -> list[URLRecord]:
         with self._get_conn() as conn:
