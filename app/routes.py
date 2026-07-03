@@ -6,6 +6,10 @@ from app.rate_limiter import enforce_rate_limit
 from app.models import ShortenRequest, ShortenResponse
 from app.shortener import shorten, lookup, init_allocator
 from db.database import Database
+import os
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
+
 
 router = APIRouter()
 db = Database()
@@ -29,7 +33,7 @@ def shorten_url(request: ShortenRequest, http_request: Request):
 
     return ShortenResponse(
         short_code=short_code,
-        short_url=f"http://localhost:8000/{short_code}",
+        short_url=f"{BASE_URL}/{short_code}",
         long_url=long_url,
         created_at=record.created_at,
     )
