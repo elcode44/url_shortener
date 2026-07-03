@@ -25,7 +25,7 @@ def lookup(short_code: str, db) -> str | None:
     if cached:
         return cached
 
-    record = db.get_url(short_code)
+    record = db.find_url(short_code)
     if not record:
         return None
 

@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from app.cache import get_from_cache
 from app.analytics import record_hit
+from app.rate_limiter import enforce_rate_limit
 from app.models import ShortenRequest, ShortenResponse
 from app.shortener import shorten, lookup, init_allocator
 from db.database import Database
@@ -12,7 +13,9 @@ init_allocator(db)
 
 
 @router.post("/shorten", response_model=ShortenResponse)
-def shorten_url(request: ShortenRequest):
+def shorten_url(request: ShortenRequest, http_request: Request):
+    enforce_rate_limit(http_request, "shorten")
+
     long_url = str(request.long_url)
 
     try:
@@ -54,7 +57,9 @@ def inspect_url(short_code: str):
 
 
 @router.get("/{short_code}")
-def redirect_to_url(short_code: str):
+def redirect_to_url(short_code: str, http_request: Request):
+    enforce_rate_limit(http_request, "redirect")
+
     long_url = lookup(short_code, db)
 
     if not long_url:
