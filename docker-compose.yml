@@ -18,6 +18,22 @@ services:
     volumes:
       - .:/app
 
+  worker:
+    build: .
+    container_name: url_shortener_worker
+    command: python worker.py
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/url_shortener
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
   postgres:
     image: postgres:16
     container_name: postgres

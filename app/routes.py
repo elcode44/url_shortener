@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 from app.cache import get_from_cache
+from app.analytics import record_hit
 from app.models import ShortenRequest, ShortenResponse
-from app.shortener import shorten, lookup
+from app.shortener import shorten, lookup, init_allocator
 from db.database import Database
 
 router = APIRouter()
 db = Database()
+init_allocator(db)
 
 
 @router.post("/shorten", response_model=ShortenResponse)
@@ -15,8 +17,6 @@ def shorten_url(request: ShortenRequest):
 
     try:
         short_code = shorten(long_url, db)
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to shorten URL: {str(e)}")
 
@@ -63,4 +63,5 @@ def redirect_to_url(short_code: str):
             detail=f"Short code '{short_code}' not found",
         )
 
+    record_hit(short_code)
     return RedirectResponse(url=long_url, status_code=302)
