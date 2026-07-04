@@ -12,7 +12,7 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
 
 router = APIRouter()
-db = Database()
+db = Database(minconn=2, maxconn=10)
 init_allocator(db)
 
 
