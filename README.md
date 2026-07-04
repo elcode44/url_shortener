@@ -1,32 +1,72 @@
 # URL Shortener
 
-A FastAPI service that turns long URLs into short codes, stores them in PostgreSQL, and redirects visitors to the original link. Includes a Redis cache for fast lookups and basic analytics (hit counts).
+A FastAPI service that turns long URLs into short codes, stores them in PostgreSQL, and redirects visitors to the original link. Built for horizontal scale: distributed ID generation, Redis-buffered analytics, rate limiting, and load-balanced replicas behind Nginx.
 
 ## Features
 
-- **Shorten URLs** — deterministic 6-character codes generated from the long URL
+- **Shorten URLs** — unique Base62-encoded short codes generated from a distributed counter (no hash collisions, safe across multiple replicas)
 - **Redirect** — `GET /{short_code}` returns a 302 redirect to the original URL
 - **Inspect** — view URL metadata without triggering a redirect
-- **Caching** — Redis TTL cache (1-hour expiry) to reduce database reads
-- **Analytics** — hit count incremented on each redirect (not on shorten or inspect)
+- **Caching** — Redis read-through cache (1-hour TTL), capped at 100MB with `allkeys-lru` eviction
+- **Analytics** — hit counts are buffered in Redis on every redirect and flushed to PostgreSQL in batches every 10 seconds by a background worker, instead of writing to the database on every request
+- **Rate limiting** — Redis sorted-set sliding-window limiter, per IP, on `/shorten` and `/{short_code}`
+- **Horizontal scaling** — 3 FastAPI replicas behind an Nginx round-robin load balancer
 - **Auto docs** — interactive API docs at `/docs`
+
+## Architecture
+
+```
+                    ┌─────────┐
+   Client ────────▶ │  Nginx  │  (round-robin load balancer)
+                    └────┬────┘
+                         │
+           ┌─────────────┼─────────────┐
+           ▼             ▼             ▼
+       ┌───────┐     ┌───────┐     ┌───────┐
+       │ app1  │     │ app2  │     │ app3  │   (FastAPI, 4 Uvicorn workers each)
+       └───┬───┘     └───┬───┘     └───┬───┘
+           │             │             │
+           └──────┬──────┴──────┬──────┘
+                   ▼             ▼
+              ┌─────────┐  ┌────────────┐
+              │  Redis  │  │ PostgreSQL │
+              └────┬────┘  └─────┬──────┘
+                   │             ▲
+                   ▼             │
+              ┌─────────────────────┐
+              │  worker.py          │  (flushes buffered hit
+              │  (background flush) │   counts every 10s)
+              └─────────────────────┘
+```
+
+Redis serves three separate purposes here, not just caching:
+
+1. **URL cache** — read-through cache for `short_code → long_url` lookups
+2. **ID allocation** — backs the range allocator that hands out unique Base62 IDs across replicas without collisions
+3. **Rate limiting** and **analytics buffering** — sliding-window counters and pending hit counts, decoupled from the request path
 
 ## Project Structure
 
 ```
 URL_shortner/
-├── main.py              # FastAPI app entry point
-├── Dockerfile           # App container image
-├── docker-compose.yml   # App + PostgreSQL + Redis
-├── requirements.txt     # Python dependencies
-├── .env                 # Environment variables for local dev (not committed)
+├── main.py                 # FastAPI app entry point
+├── worker.py               # Background worker: flushes buffered hit counts to Postgres every 10s
+├── locustfile.py           # Load test definitions (Locust)
+├── Dockerfile              # App container image (runs Uvicorn with 4 workers)
+├── docker-compose.yml      # app1/app2/app3 + Nginx + PostgreSQL + Redis + worker
+├── nginx.conf              # Round-robin upstream config for the 3 app replicas
+├── requirements.txt        # Python dependencies
+├── .env                    # Environment variables for local dev (not committed)
 ├── app/
-│   ├── routes.py        # HTTP endpoints
-│   ├── shortener.py     # URL hashing, shorten/lookup logic
-│   ├── cache.py         # Redis cache helpers
-│   └── models.py        # Pydantic request/response models
+│   ├── routes.py           # HTTP endpoints
+│   ├── shortener.py        # Shorten/lookup logic (Base62 short code generation)
+│   ├── id_allocator.py     # Distributed range allocator + Base62 encoding
+│   ├── analytics.py        # Redis-buffered hit-count recording and flushing
+│   ├── rate_limiter.py     # Sliding-window rate limiter (Redis sorted sets)
+│   ├── cache.py            # Redis cache helpers
+│   └── models.py           # Pydantic request/response models
 ├── db/
-│   └── database.py      # PostgreSQL connection and queries
+│   └── database.py         # PostgreSQL connection pool, queries, ID block allocation
 └── tests/
     └── test_shortener.py
 ```
@@ -34,11 +74,11 @@ URL_shortner/
 ## Prerequisites
 
 - **Docker Desktop** (recommended — runs the full stack)
-- **Python 3.11+** and **pip** (only needed for local development without Docker)
+- **Python 3.11+** and **pip** (only needed for local development without Docker, or for running load tests)
 
 ## Quick Start (Docker Compose)
 
-This is the easiest way to run the app, PostgreSQL, and Redis together.
+This runs the full distributed stack: 3 app replicas, Nginx, PostgreSQL, Redis, and the analytics worker.
 
 ### 1. Start the stack
 
@@ -47,26 +87,25 @@ cd c:\projects_faang\URL_shortner
 docker compose up --build
 ```
 
-Wait until you see:
+Wait until all services report ready. Check status in another terminal:
 
-```text
-url_shortener_app  | Server started — docs at http://localhost:8000/docs
-url_shortener_app  | INFO:     Uvicorn running on http://0.0.0.0:8000
+```powershell
+docker compose ps
 ```
+
+You should see `nginx`, `app1`, `app2`, `app3`, `postgres`, `redis`, and `worker` all `Up`.
 
 ### 2. Open the API docs
 
-In your browser, go to:
+**http://localhost:8001/docs**
 
-**http://localhost:8000/docs**
+All traffic goes through Nginx on port **8001**, which load-balances across the 3 app replicas. There is no reason to reach `app1`/`app2`/`app3` directly in normal use.
 
-Use `localhost` or `127.0.0.1` — **not** `http://0.0.0.0:8000`. The `0.0.0.0` address in the Uvicorn log is the bind address inside the container (listen on all interfaces). It is not a URL you open in a browser.
+There is no homepage at `/`. Visiting `http://localhost:8001/` returns `{"detail":"Not Found"}` — that's expected. Use `/docs` or the API endpoints below.
 
-There is no homepage at `/`. If you visit `http://localhost:8000/` you will get `{"detail":"Not Found"}` — that is expected. Use `/docs` or the API endpoints below.
+> **Note on `/docs` and redirects:** Swagger UI's "Try it out" button uses `fetch()` in the browser, which will fail on the `GET /{short_code}` endpoint with a CORS-related error when it tries to follow the 302. This is a Swagger UI limitation, not a bug — test redirects by pasting the short URL directly into your browser's address bar, or with `curl -i`.
 
 ### 3. Stop the stack
-
-Press `Ctrl+C` in the terminal, then:
 
 ```powershell
 docker compose down
@@ -80,13 +119,33 @@ docker compose down -v
 
 ### What Docker Compose runs
 
-| Service  | Container name      | Host port |
-|----------|---------------------|-----------|
-| FastAPI  | `url_shortener_app` | 8000      |
-| Postgres | `postgres`          | 5432      |
-| Redis    | `redis`             | 6379      |
+| Service    | Container name         | Reachable at                 |
+| ---------- | ---------------------- | ---------------------------- |
+| Nginx      | `url_shortener_nginx`  | `localhost:8001` (host)      |
+| FastAPI ×3 | `app1`, `app2`, `app3` | internal only (behind Nginx) |
+| Worker     | `url_shortener_worker` | internal only                |
+| Postgres   | `postgres`             | `localhost:5432`             |
+| Redis      | `redis`                | `localhost:6379`             |
 
-Environment variables for the app container are set in `docker-compose.yml` — no `.env` file is required for Docker Compose.
+Environment variables are set directly in `docker-compose.yml` — no `.env` file is required for Docker Compose.
+
+### Toggle switches (for testing / debugging)
+
+These default to production-safe values and only need to be touched when isolating a specific piece of the stack (e.g. load testing):
+
+| Variable             | Default | Effect when set to `false`                                        |
+| -------------------- | ------- | ----------------------------------------------------------------- |
+| `CACHE_ENABLED`      | `true`  | Bypasses the Redis URL cache; every lookup hits Postgres directly |
+| `RATE_LIMIT_ENABLED` | `true`  | Disables the per-IP rate limiter entirely                         |
+
+Example:
+
+```powershell
+$env:CACHE_ENABLED="false"
+docker compose up --build
+```
+
+`app1` additionally has a direct host port mapping (`8002:8000`) so it can be load-tested in isolation, without Nginx or the other replicas, by pointing requests at `http://localhost:8002`.
 
 ## Local Development (without Docker for the app)
 
@@ -99,21 +158,11 @@ cd c:\projects_faang\URL_shortner
 pip install -r requirements.txt
 ```
 
-### 2. Start PostgreSQL and Redis
-
-With Docker Compose (app service only is optional — or start postgres + redis manually):
+### 2. Start PostgreSQL and Redis only
 
 ```powershell
 docker compose up postgres redis -d
 ```
-
-Or start an existing postgres container:
-
-```powershell
-docker start postgres
-```
-
-You also need Redis on port `6379`. The compose file starts it as container `redis`.
 
 ### 3. Configure environment variables
 
@@ -122,16 +171,12 @@ Create a `.env` file in the project root:
 ```env
 DATABASE_URL=postgresql://postgres:password@localhost:5432/url_shortener
 REDIS_URL=redis://localhost:6379
+BASE_URL=http://localhost:8000
 ```
-
-| Variable       | Description                          |
-|----------------|--------------------------------------|
-| `DATABASE_URL` | PostgreSQL connection string         |
-| `REDIS_URL`    | Redis connection string              |
 
 The default values match the Docker Compose services: user `postgres`, password `password`, database `url_shortener`.
 
-The `urls` table is created automatically on first startup — no manual migration needed.
+Tables (`urls` and `id_counter`) are created automatically on first startup — no manual migration needed.
 
 ### 4. Run the app
 
@@ -139,18 +184,17 @@ The `urls` table is created automatically on first startup — no manual migrati
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-If port 8000 is unavailable, use another port (e.g. `8001`).
+If you want buffered hit counts actually flushed to Postgres in this mode, also run the worker in a separate terminal:
 
-Once running:
-
-- **API docs:** http://localhost:8000/docs
-- **Try it:** shorten a URL via the docs UI or the examples below
+```powershell
+python worker.py
+```
 
 ## API Endpoints
 
 ### `POST /shorten`
 
-Create a short code for a long URL. The same long URL always produces the same short code.
+Create a unique short code for a long URL. Each call generates a new, unique code — calling this twice with the same URL produces two different short codes (this is a deliberate tradeoff of the distributed counter approach; see "How It Works" below).
 
 **Request:**
 
@@ -164,17 +208,17 @@ Create a short code for a long URL. The same long URL always produces the same s
 
 ```json
 {
-  "short_code": "e6gYNz",
-  "short_url": "http://localhost:8000/e6gYNz",
+  "short_code": "4a6",
+  "short_url": "http://localhost:8001/4a6",
   "long_url": "https://example.com/some/very/long/path",
-  "created_at": "2026-06-27T15:20:10"
+  "created_at": "2026-07-03T15:20:10"
 }
 ```
 
 **Example (PowerShell):**
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/shorten" `
+Invoke-RestMethod -Uri "http://localhost:8001/shorten" `
   -Method POST `
   -Body '{"long_url": "https://example.com"}' `
   -ContentType "application/json"
@@ -182,29 +226,26 @@ Invoke-RestMethod -Uri "http://localhost:8000/shorten" `
 
 **Errors:**
 
-| Status | When |
-|--------|------|
-| 409    | Hash collision — short code already maps to a different URL |
-| 422    | Invalid URL in request body |
-| 500    | Database or server error |
+| Status | When                                         |
+| ------ | -------------------------------------------- |
+| 422    | Invalid URL in request body                  |
+| 429    | Rate limit exceeded (20 requests/60s per IP) |
+| 500    | Database or server error                     |
 
 ---
 
 ### `GET /{short_code}`
 
-Redirect to the original URL.
+Redirect to the original URL. Also records a hit in Redis (flushed to Postgres asynchronously — see "How It Works").
 
 **Response:** `302 Found` with `Location` header set to the long URL.
 
-**Example:**
-
-Open `http://localhost:8000/e6gYNz` in a browser — you will be redirected to the original URL.
-
 **Errors:**
 
-| Status | When |
-|--------|------|
-| 404    | Short code not found |
+| Status | When                                         |
+| ------ | -------------------------------------------- |
+| 404    | Short code not found                         |
+| 429    | Rate limit exceeded (60 requests/60s per IP) |
 
 ---
 
@@ -216,35 +257,35 @@ Return URL metadata without redirecting or incrementing the hit count.
 
 ```json
 {
-  "short_code": "e6gYNz",
+  "short_code": "4a6",
   "long_url": "https://example.com/some/very/long/path",
   "hit_count": 3,
-  "created_at": "2026-06-27T15:20:10"
+  "created_at": "2026-07-03T15:20:10"
 }
 ```
 
-**Example:**
-
-```powershell
-Invoke-RestMethod -Uri "http://localhost:8000/inspect/e6gYNz"
-```
+> `hit_count` is eventually consistent — it can lag up to ~10 seconds behind real traffic, since hits are buffered in Redis and flushed to Postgres in batches rather than written on every redirect. This is a deliberate tradeoff to keep the redirect path fast under load.
 
 ## How It Works
 
 ### Short code generation
 
-1. The long URL is hashed with MD5.
-2. The hash is base64-encoded and truncated to 6 URL-safe characters.
-3. The same input URL always produces the same short code (deterministic).
+1. Each replica reserves a block of IDs (default 1,000) from a shared Postgres counter in a single atomic `UPDATE ... RETURNING`.
+2. IDs are handed out from that in-memory block one at a time, avoiding a database round-trip per request.
+3. When a block is exhausted, the replica reserves the next one.
+4. Each integer ID is Base62-encoded (`0-9`, `a-z`, `A-Z`) into the final short code.
+
+This guarantees uniqueness across any number of replicas without coordination between them, and without the collision risk of hashing.
 
 ### Request flow — shorten
 
 ```
 Client → POST /shorten
-       → Check Redis cache
-       → Check PostgreSQL (find_url — no hit count change)
-       → Insert if new
-       → Store in cache
+       → Rate limit check (Redis)
+       → Reserve next ID from allocator (Postgres-backed block)
+       → Base62-encode ID → short_code
+       → Save to PostgreSQL
+       → Store in Redis cache
        → Return short code + metadata
 ```
 
@@ -252,91 +293,110 @@ Client → POST /shorten
 
 ```
 Client → GET /{short_code}
-       → Check Redis cache
-       → PostgreSQL lookup (get_url — increments hit_count)
-       → Store in cache
+       → Rate limit check (Redis)
+       → Check Redis cache → PostgreSQL fallback (no hit-count write here)
+       → Buffer hit in Redis (HINCRBY)
        → 302 redirect to long URL
+
+Meanwhile, every 10s:
+worker.py → pop buffered hits from Redis → batch UPDATE into PostgreSQL
 ```
+
+Moving the hit-count write off the request path was the single biggest throughput improvement in this project — the old design updated a row in Postgres on every redirect, which serialized all redirect traffic against the database.
 
 ### Caching
 
 - **Backend:** Redis
-- **TTL:** 1 hour per entry (default)
-- Cache survives app restarts when using Docker Compose (Redis runs as its own container)
+- **TTL:** 1 hour per entry
+- **Eviction:** capped at 100MB, `allkeys-lru` policy — least-recently-used keys are evicted once memory fills up, regardless of TTL
+- Cache survives app restarts (Redis runs as its own container with its own lifecycle)
+
+### Rate limiting
+
+Sliding-window algorithm implemented with a Redis sorted set per IP per endpoint. Unlike a fixed window, this doesn't allow a burst of `2×limit` requests at a window boundary — the count always reflects the trailing N seconds exactly.
+
+| Endpoint            | Limit                    |
+| ------------------- | ------------------------ |
+| `POST /shorten`     | 20 requests / 60s per IP |
+| `GET /{short_code}` | 60 requests / 60s per IP |
 
 ### Database schema
 
 Table: `urls`
 
-| Column       | Type         | Description                    |
-|--------------|--------------|--------------------------------|
-| `short_code` | VARCHAR(10)  | Primary key                    |
-| `long_url`   | TEXT         | Original URL                   |
-| `created_at` | TIMESTAMP    | When the link was created      |
-| `hit_count`  | INTEGER      | Number of redirects served     |
-| `expires_at` | TIMESTAMP    | Optional expiry (unused by default) |
+| Column       | Type        | Description                                        |
+| ------------ | ----------- | -------------------------------------------------- |
+| `short_code` | VARCHAR(10) | Primary key                                        |
+| `long_url`   | TEXT        | Original URL                                       |
+| `created_at` | TIMESTAMP   | When the link was created                          |
+| `hit_count`  | INTEGER     | Number of redirects served (eventually consistent) |
+| `expires_at` | TIMESTAMP   | Optional expiry (unused by default)                |
+
+Table: `id_counter`
+
+| Column          | Type    | Description                                |
+| --------------- | ------- | ------------------------------------------ |
+| `id`            | INTEGER | Always `1` (single row, enforced by CHECK) |
+| `current_value` | BIGINT  | High-water mark for allocated ID blocks    |
+
+## Load Testing
+
+`locustfile.py` simulates realistic traffic (weighted toward redirects, as in real-world usage) against `/shorten`, `/{short_code}`, and `/inspect/{short_code}`.
+
+```powershell
+pip install locust
+```
+
+Run distributed across multiple processes for accurate results (Locust's `--processes` flag isn't supported on native Windows, so use master/worker mode across separate terminals):
+
+```powershell
+# 3 terminals:
+locust -f locustfile.py --worker --master-host=127.0.0.1
+
+# 1 terminal (start last):
+locust -f locustfile.py --master --headless -u 150 -r 15 -t 90s --host=http://localhost:8001 --csv=results
+```
+
+**Results** (150 concurrent users, cache enabled, rate limiting disabled for testing purposes — see toggle switches above):
+
+| Configuration                    | Failure rate | p99 latency |
+| -------------------------------- | ------------ | ----------- |
+| Single instance, no cache        | 0.73%        | 190ms       |
+| 3 replicas + Nginx + Redis cache | **0%**       | **100ms**   |
+
+The distributed setup eliminates failures entirely at this load and roughly halves p99 latency. Failure rates on both configurations climb sharply beyond ~225 concurrent users — that ceiling is a function of the current Postgres/Nginx connection and timeout settings (see `docker-compose.yml`'s `max_connections` and `nginx.conf`'s `proxy_*_timeout` directives), not an inherent limit of the architecture.
 
 ## Troubleshooting
 
-### Browser shows an error for `http://0.0.0.0:8000`
+### `ModuleNotFoundError` on container startup
 
-Use **http://localhost:8000/docs** instead. `0.0.0.0` is only the server bind address inside the container.
+Check that the file it's complaining about actually exists on disk at the expected path — since the app directory is mounted as a Docker volume, a missing file on the host is missing inside the container too. `docker compose logs <service>` will show the traceback.
 
-### `GET /` returns 404 in the terminal logs
+### 502 Bad Gateway from Nginx under load
 
-That is normal — there is no root route. Open `/docs` or call an API endpoint.
+Nginx gives up on a backend after `proxy_read_timeout` (currently 10s, set in `nginx.conf`). A 502 under heavy load usually means a backend replica was still busy past that window — check `docker compose ps` for crashed containers first, then consider whether Postgres's `max_connections` or the app's connection pool size (`db = Database(minconn=2, maxconn=10)` in `app/routes.py`) needs adjusting.
 
-### Mixed log lines from postgres and the app
+### Rate limit errors (429) during manual testing
 
-Docker Compose prints logs from all services together. Lines like `write=... sync=...` come from PostgreSQL checkpoint activity, not from your app failing.
+Expected if you're sending many requests quickly from one IP. Set `RATE_LIMIT_ENABLED=false` (see toggle switches above) if you need to bypass it temporarily.
 
-### `Connection refused` on port 5432
+### Port 8001 already in use
 
-PostgreSQL is not running. With Docker Compose:
-
-```powershell
-docker compose up postgres -d
-```
-
-Or start an existing container:
-
-```powershell
-docker start postgres
-```
-
-### `connection to server at "localhost" ... failed`
-
-- Confirm containers are up: `docker compose ps`
-- Confirm `.env` has the correct `DATABASE_URL` (local dev only)
-- Wait a few seconds after startup — Postgres needs a moment to initialize
-
-### Redis connection errors (local dev)
-
-Ensure Redis is running on port `6379` and `REDIS_URL=redis://localhost:6379` is set in `.env`. With Docker Compose, Redis starts automatically.
-
-### Port 8000 already in use
-
-Stop the other process or use a different port:
-
-```powershell
-uvicorn main:app --reload --host 127.0.0.1 --port 8001
-```
-
-Then use `http://localhost:8001` in API calls and the browser.
+Stop whatever else is bound to it, or change Nginx's host port mapping in `docker-compose.yml`.
 
 ### Short code not found after restart
 
-Data persists in PostgreSQL across app restarts when using the `pgdata` Docker volume. If you ran `docker compose down -v`, the database data is removed. Shorten URLs again after recreating the stack.
+Data persists in PostgreSQL across restarts via the `pgdata` Docker volume. If you ran `docker compose down -v`, the data was removed — shorten URLs again after recreating the stack.
 
 ## Tech Stack
 
-| Component     | Technology        |
-|---------------|-------------------|
-| Web framework | FastAPI           |
-| Server        | Uvicorn           |
-| Database      | PostgreSQL 16     |
-| Cache         | Redis             |
-| DB driver     | psycopg2          |
-| Validation    | Pydantic          |
-| Config        | python-dotenv     |
-| Containers    | Docker Compose    |
+| Component            | Technology                                                         |
+| -------------------- | ------------------------------------------------------------------ |
+| Web framework        | FastAPI (Uvicorn, 4 workers per replica)                           |
+| Load balancer        | Nginx (round-robin)                                                |
+| Database             | PostgreSQL 16                                                      |
+| Cache / coordination | Redis (caching, ID allocation, rate limiting, analytics buffering) |
+| DB driver            | psycopg2 (`ThreadedConnectionPool`)                                |
+| Validation           | Pydantic                                                           |
+| Load testing         | Locust                                                             |
+| Containers           | Docker Compose                                                     |

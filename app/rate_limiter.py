@@ -1,3 +1,4 @@
+import os
 import time
 from fastapi import HTTPException, Request
 from app.cache import r
@@ -7,6 +8,11 @@ LIMITS = {
     "shorten": (20, 60),   # 20 requests / 60 seconds
     "redirect": (60, 60),  # redirects are read-heavy, allow more
 }
+
+# Set RATE_LIMIT_ENABLED=false during load testing -- a per-IP limiter
+# can't be load-tested meaningfully when every simulated user shares
+# one machine's IP. Leave it unset/true for normal use.
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
 
 
 def _client_ip(request: Request) -> str:
@@ -27,6 +33,9 @@ def enforce_rate_limit(request: Request, bucket: str) -> None:
     call, so ZCARD always reflects "requests in the last N seconds" --
     no fixed-window boundary bursting.
     """
+    if not RATE_LIMIT_ENABLED:
+        return
+
     limit, window_seconds = LIMITS[bucket]
     ip = _client_ip(request)
     key = f"ratelimit:{bucket}:{ip}"

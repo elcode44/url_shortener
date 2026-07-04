@@ -4,10 +4,14 @@ version: "3.9"
 services:
   app1:
     build: .
+    ports:
+      - "8002:8000"
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/url_shortener
       REDIS_URL: redis://redis:6379
-      BASE_URL: http://localhost:8001
+      BASE_URL: http://localhost:8002
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -22,6 +26,8 @@ services:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/url_shortener
       REDIS_URL: redis://redis:6379
       BASE_URL: http://localhost:8001
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,6 +42,8 @@ services:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/url_shortener
       REDIS_URL: redis://redis:6379
       BASE_URL: http://localhost:8001
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
