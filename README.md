@@ -401,4 +401,4 @@ Data persists in PostgreSQL across restarts via the `pgdata` Docker volume. If y
 | Load testing         | Locust                                                             |
 | Containers           | Docker Compose                                                     |
 
-![Locust load test: 300 concurrent users, 0% failure rate](C:\projects_faang\URL_shortner\Screenshot 2026-07-24 105609.png)
+![Locust load test: 300 concurrent users, 0% failure rate](./screenshots/locust_300_users.png)
