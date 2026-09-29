@@ -42,8 +42,10 @@ A FastAPI service that turns long URLs into short codes, stores them in PostgreS
 Redis serves three separate purposes here, not just caching:
 
 1. **URL cache** — read-through cache for `short_code → long_url` lookups
-2. **ID allocation** — backs the range allocator that hands out unique Base62 IDs across replicas without collisions
-3. **Rate limiting** and **analytics buffering** — sliding-window counters and pending hit counts, decoupled from the request path
+2. **Rate limiting** — sliding-window counters per IP
+3. **Analytics buffering** — pending hit counts, decoupled from the request path
+
+ID allocation lives in Postgres: each replica reserves a block of IDs from a single-row counter table (see "Short code generation").
 
 ## Project Structure
 
@@ -137,6 +139,7 @@ These default to production-safe values and only need to be touched when isolati
 | -------------------- | ------- | ----------------------------------------------------------------- |
 | `CACHE_ENABLED`      | `true`  | Bypasses the Redis URL cache; every lookup hits Postgres directly |
 | `RATE_LIMIT_ENABLED` | `true`  | Disables the per-IP rate limiter entirely                         |
+| `ANALYTICS_BATCHING` | `true`  | Writes every click straight to Postgres (only for benchmarking)   |
 
 Example:
 
@@ -366,6 +369,8 @@ locust -f locustfile.py --master --headless -u 150 -r 15 -t 90s --host=http://lo
 
 The distributed setup eliminates failures entirely at this load and roughly halves p99 latency. Failure rates on both configurations climb sharply beyond ~225 concurrent users — that ceiling is a function of the current Postgres/Nginx connection and timeout settings (see `docker-compose.yml`'s `max_connections` and `nginx.conf`'s `proxy_*_timeout` directives), not an inherent limit of the architecture.
 
+<!-- RESULTS -->
+
 ## Troubleshooting
 
 ### `ModuleNotFoundError` on container startup
@@ -395,7 +400,9 @@ Data persists in PostgreSQL across restarts via the `pgdata` Docker volume. If y
 | Web framework        | FastAPI (Uvicorn, 4 workers per replica)                           |
 | Load balancer        | Nginx (round-robin)                                                |
 | Database             | PostgreSQL 16                                                      |
-| Cache / coordination | Redis (caching, ID allocation, rate limiting, analytics buffering) |
+| Cache / coordination | Redis (caching, rate limiting, analytics buffering)                |
+| ID allocation        | PostgreSQL single-row counter, block reservation per replica       |
+| Edge cache           | Cloudflare Workers + Workers KV (see `edge/`)                       |
 | DB driver            | psycopg2 (`ThreadedConnectionPool`)                                |
 | Validation           | Pydantic                                                           |
 | Load testing         | Locust                                                             |

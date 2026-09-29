@@ -72,5 +72,5 @@ def redirect_to_url(short_code: str, http_request: Request):
             detail=f"Short code '{short_code}' not found",
         )
 
-    record_hit(short_code)
+    record_hit(short_code, db)
     return RedirectResponse(url=long_url, status_code=302)

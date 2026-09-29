@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import psycopg2
 import psycopg2.extras
@@ -16,6 +17,11 @@ load_dotenv()
 class Database:
     def __init__(self, minconn: int = 2, maxconn: int = 20):
         self.pool = self._connect_with_retry(minconn, maxconn)
+        # psycopg2's pool raises PoolError the instant it runs dry. FastAPI runs
+        # sync endpoints on a ~40-thread pool, so under load more threads want a
+        # connection than exist and requests fail with 500s. The semaphore makes
+        # extra threads wait for a free connection instead of failing.
+        self._slots = threading.BoundedSemaphore(maxconn)
         self._create_table()
 
     def _connect_with_retry(self, minconn, maxconn, retries=5, delay=2):
@@ -38,15 +44,20 @@ class Database:
     @contextmanager
     def _get_conn(self):
         """Borrow a connection from the pool, always return it -- even on error."""
-        conn = self.pool.getconn()
+        if not self._slots.acquire(timeout=5):
+            raise TimeoutError("timed out waiting for a database connection")
         try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+            conn = self.pool.getconn()
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                self.pool.putconn(conn)
         finally:
-            self.pool.putconn(conn)
+            self._slots.release()
 
     def _create_table(self):
         with self._get_conn() as conn:
@@ -140,6 +151,15 @@ class Database:
                     values,
                 )
                 return cur.rowcount
+
+    def increment_hit(self, short_code: str) -> None:
+        """Unbatched path: one UPDATE per click (used only when batching is off)."""
+        with self._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE urls SET hit_count = hit_count + 1 WHERE short_code = %s;",
+                    (short_code,),
+                )
 
     def get_all(self) -> list[URLRecord]:
         with self._get_conn() as conn:

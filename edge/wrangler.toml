@@ -1,0 +1,14 @@
+name = "url-shortener-edge"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+[vars]
+# Public URL of the FastAPI backend (the Nginx port, exposed with
+# `cloudflared tunnel --url http://localhost:8001`). Replace before deploying.
+ORIGIN_URL = "https://REPLACE-ME.trycloudflare.com"
+KV_TTL_SECONDS = "3600"
+
+[[kv_namespaces]]
+binding = "LINKS"
+# Paste the id printed by: npx wrangler kv namespace create LINKS
+id = "REPLACE_WITH_KV_NAMESPACE_ID"

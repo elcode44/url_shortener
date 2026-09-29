@@ -1,14 +1,22 @@
+import os
 import redis
 from app.cache import r
 
 PENDING_HITS_KEY = "pending_hits"
 
+# ANALYTICS_BATCHING=false writes every click straight to Postgres on the
+# request path. Only exists so the two modes can be benchmarked side by side.
+ANALYTICS_BATCHING = os.getenv("ANALYTICS_BATCHING", "true").lower() == "true"
 
-def record_hit(short_code: str) -> None:
+
+def record_hit(short_code: str, db=None) -> None:
     """
     Fire-and-forget: bump the pending hit counter for this short_code in Redis.
     O(1), no Postgres write on the request path.
     """
+    if not ANALYTICS_BATCHING and db is not None:
+        db.increment_hit(short_code)
+        return
     r.hincrby(PENDING_HITS_KEY, short_code, 1)
 
 

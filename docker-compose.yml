@@ -12,6 +12,7 @@ services:
       BASE_URL: http://localhost:8002
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      ANALYTICS_BATCHING: ${ANALYTICS_BATCHING:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,6 +29,7 @@ services:
       BASE_URL: http://localhost:8001
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      ANALYTICS_BATCHING: ${ANALYTICS_BATCHING:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,6 +46,7 @@ services:
       BASE_URL: http://localhost:8001
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      ANALYTICS_BATCHING: ${ANALYTICS_BATCHING:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,7 +93,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-    command: postgres -c max_connections=200
+    command: postgres -c max_connections=200 -c shared_preload_libraries=pg_stat_statements
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s

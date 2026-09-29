@@ -1,9 +1,14 @@
+import os
 import random
-from locust import HttpUser, task, between
+from locust import HttpUser, task, between, constant_throughput
+
+# FIXED_RATE_PER_USER=2 makes each simulated user send exactly 2 requests/s,
+# so total RPS = users x 2 and stays flat for the whole run.
+_fixed = os.getenv("FIXED_RATE_PER_USER")
 
 
 class URLShortenerUser(HttpUser):
-    wait_time = between(0.1, 0.5)
+    wait_time = constant_throughput(float(_fixed)) if _fixed else between(0.1, 0.5)
     known_codes = []
 
     def on_start(self):
@@ -38,6 +43,7 @@ class URLShortenerUser(HttpUser):
         code = random.choice(URLShortenerUser.known_codes)
         with self.client.get(
             f"/{code}",
+            name="/{short_code}",
             allow_redirects=False,
             catch_response=True,
         ) as resp:
