@@ -121,6 +121,10 @@ def main():
     r = subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=ROOT, env=env)
     if r.returncode:
         sys.exit("docker compose up failed")
+    # Nginx resolves app1/app2/app3 to IPs once, at startup. If the app
+    # containers were recreated (new build) while Nginx kept running, it keeps
+    # sending traffic to stale IPs. Recreate it so it sees the current ones.
+    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "nginx"], cwd=ROOT)
     wait_for_stack()
 
     ncpu = sh(["docker", "info", "--format", "{{.NCPU}} CPUs, {{.MemTotal}} bytes"]).stdout.strip()
