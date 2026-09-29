@@ -1,13 +1,22 @@
 import os
 import random
-from locust import HttpUser, task, between, constant_throughput
+from locust import FastHttpUser, task, between, constant_throughput
+from locust.contrib.fasthttp import LocustUserAgent
+
+# Never follow redirects: we're measuring our 302, not example.com.
+# (Locust's allow_redirects=False is a no-op with newer geventhttpclient
+# because of an attribute-name mismatch, so turn following off directly.)
+LocustUserAgent.redirect_response_codes = frozenset()
+LocustUserAgent.redirect_resonse_codes = frozenset()
 
 # FIXED_RATE_PER_USER=2 makes each simulated user send exactly 2 requests/s,
 # so total RPS = users x 2 and stays flat for the whole run.
 _fixed = os.getenv("FIXED_RATE_PER_USER")
 
 
-class URLShortenerUser(HttpUser):
+class URLShortenerUser(FastHttpUser):
+    # FastHttpUser: much lighter on CPU than HttpUser, so one Locust process
+    # can generate more load.
     wait_time = constant_throughput(float(_fixed)) if _fixed else between(0.1, 0.5)
     known_codes = []
 
