@@ -1,6 +1,8 @@
 # URL Shortener
 
-A FastAPI service that turns long URLs into short codes, stores them in PostgreSQL, and redirects visitors to the original link. Built for horizontal scale: distributed ID generation, Redis-buffered analytics, rate limiting, and load-balanced replicas behind Nginx.
+A FastAPI service that turns long URLs into short codes, stores them in PostgreSQL, and redirects visitors to the original link. Built for horizontal scale: distributed ID generation, Redis-buffered analytics, rate limiting, load-balanced replicas behind Nginx, and an edge redirect cache on Cloudflare Workers.
+
+**Measured** (details in [Benchmark Results](#benchmark-results)): 800 RPS for 4 minutes with zero failures (p50 43 ms, p99 160 ms) on one laptop. Kept serving 800 RPS after a replica was killed mid-test. Batching cut Postgres writes ~50x. The edge cache cut median redirect latency from 75 ms to 29 ms.
 
 ## Features
 
@@ -10,14 +12,18 @@ A FastAPI service that turns long URLs into short codes, stores them in PostgreS
 - **Caching** — Redis read-through cache (1-hour TTL), capped at 100MB with `allkeys-lru` eviction
 - **Analytics** — hit counts are buffered in Redis on every redirect and flushed to PostgreSQL in batches every 10 seconds by a background worker, instead of writing to the database on every request
 - **Rate limiting** — Redis sorted-set sliding-window limiter, per IP, on `/shorten` and `/{short_code}`
-- **Horizontal scaling** — 3 FastAPI replicas behind an Nginx round-robin load balancer
+- **Horizontal scaling** — 3 FastAPI replicas behind an Nginx round-robin load balancer, with automatic failover when a replica dies
+- **Edge cache** — Cloudflare Worker that serves redirects from Workers KV at the edge (`edge/`)
 - **Auto docs** — interactive API docs at `/docs`
 
 ## Architecture
 
 ```
+   Client ──▶ Cloudflare Worker + KV  (optional edge cache, see edge/)
+                         │  cache miss
+                         ▼
                     ┌─────────┐
-   Client ────────▶ │  Nginx  │  (round-robin load balancer)
+                    │  Nginx  │  (round-robin, retries on a live replica)
                     └────┬────┘
                          │
            ┌─────────────┼─────────────┐
@@ -50,7 +56,7 @@ ID allocation lives in Postgres: each replica reserves a block of IDs from a sin
 ## Project Structure
 
 ```
-URL_shortner/
+url_shortener/
 ├── main.py                 # FastAPI app entry point
 ├── worker.py               # Background worker: flushes buffered hit counts to Postgres every 10s
 ├── locustfile.py           # Load test definitions (Locust)
@@ -69,6 +75,13 @@ URL_shortner/
 │   └── models.py           # Pydantic request/response models
 ├── db/
 │   └── database.py         # PostgreSQL connection pool, queries, ID block allocation
+├── bench/
+│   ├── run_load_test.py    # Fixed-RPS Locust run + replica kill, prints RPS / failures / p50 / p99
+│   ├── batching_writes.py  # Counts Postgres writes with analytics batching on vs off
+│   └── latency.py          # Median redirect latency: origin vs Cloudflare Worker
+├── edge/                   # Cloudflare Worker (KV redirect cache), see edge/README.md
+│   ├── src/index.js
+│   └── wrangler.toml
 └── tests/
     └── test_shortener.py
 ```
@@ -85,7 +98,8 @@ This runs the full distributed stack: 3 app replicas, Nginx, PostgreSQL, Redis, 
 ### 1. Start the stack
 
 ```powershell
-cd c:\projects_faang\URL_shortner
+git clone https://github.com/elcode44/url_shortener.git
+cd url_shortener
 docker compose up --build
 ```
 
@@ -157,7 +171,7 @@ Use this if you want hot reload with `uvicorn --reload`. You still need PostgreS
 ### 1. Install dependencies
 
 ```powershell
-cd c:\projects_faang\URL_shortner
+cd url_shortener
 pip install -r requirements.txt
 ```
 
@@ -440,6 +454,10 @@ Check that the file it's complaining about actually exists on disk at the expect
 ### 502 Bad Gateway from Nginx under load
 
 Nginx gives up on a backend after `proxy_read_timeout` (currently 10s, set in `nginx.conf`). A 502 under heavy load usually means a backend replica was still busy past that window — check `docker compose ps` for crashed containers first, then consider whether Postgres's `max_connections` or the app's connection pool size (`db = Database(minconn=2, maxconn=10)` in `app/routes.py`) needs adjusting.
+
+### `connect() failed (111: Connection refused)` or `No route to host` in the Nginx logs
+
+Nginx resolves `app1`/`app2`/`app3` to IPs once, when it starts. If the app containers were rebuilt or recreated while Nginx kept running, it can still be sending traffic to their old IPs. Restart it with `docker compose restart nginx`. (`bench/run_load_test.py` does this for you.)
 
 ### Rate limit errors (429) during manual testing
 
