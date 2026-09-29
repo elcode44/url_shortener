@@ -347,8 +347,11 @@ Table: `id_counter`
 `locustfile.py` simulates realistic traffic (weighted toward redirects, as in real-world usage) against `/shorten`, `/{short_code}`, and `/inspect/{short_code}`.
 
 ```powershell
-pip install locust
+pip install locust httpx psycopg2-binary
+python bench/run_load_test.py      # clean run + replica kill, prints RPS / failures / p50 / p99
 ```
+
+Or run Locust by hand:
 
 Run distributed across multiple processes for accurate results (Locust's `--processes` flag isn't supported on native Windows, so use master/worker mode across separate terminals):
 
@@ -360,16 +363,73 @@ locust -f locustfile.py --worker --master-host=127.0.0.1
 locust -f locustfile.py --master --headless -u 150 -r 15 -t 90s --host=http://localhost:8001 --csv=results
 ```
 
-**Results** (150 concurrent users, cache enabled, rate limiting disabled for testing purposes — see toggle switches above):
+**Earlier results, before the connection-pool fix** (150 concurrent users, cache enabled, rate limiting disabled for testing purposes — see toggle switches above):
 
 | Configuration                    | Failure rate | p99 latency |
 | -------------------------------- | ------------ | ----------- |
 | Single instance, no cache        | 0.73%        | 190ms       |
 | 3 replicas + Nginx + Redis cache | **0%**       | **100ms**   |
 
-The distributed setup eliminates failures entirely at this load and roughly halves p99 latency. Failure rates on both configurations climb sharply beyond ~225 concurrent users — that ceiling is a function of the current Postgres/Nginx connection and timeout settings (see `docker-compose.yml`'s `max_connections` and `nginx.conf`'s `proxy_*_timeout` directives), not an inherent limit of the architecture.
+The distributed setup eliminates failures entirely at this load and roughly halves p99 latency. Failure rates on both configurations climb sharply beyond ~225 concurrent users — that ceiling is a function of the current Postgres/Nginx connection and timeout settings (see `docker-compose.yml`'s `max_connections` and `nginx.conf`'s `proxy_*_timeout` directives), not an inherent limit of the architecture. (That ceiling turned out to be connection-pool exhaustion. See Benchmark Results below for the fix and current numbers.)
 
-<!-- RESULTS -->
+## Benchmark Results
+
+All numbers below are from real runs, reproducible with the scripts in `bench/`.
+Machine: Windows 11 laptop, Intel Core Ultra (22 threads), Docker Desktop with 8 GB.
+Load tests ran with `RATE_LIMIT_ENABLED=false` (every simulated user shares one IP).
+
+### Sustained load: 3 replicas behind Nginx
+
+`python bench/run_load_test.py`: 400 Locust users at a fixed 2 req/s each for 4 minutes.
+Traffic mix is 10 redirects : 3 inspects : 1 shorten.
+
+| Run | Steady RPS | Requests | Failures | p50 | p99 |
+| --- | --- | --- | --- | --- | --- |
+| Clean (all 3 replicas up) | 801 | 188,375 | **0** | 43 ms | 160 ms |
+| `docker stop app2` at t=120 s | 799 (798 after the kill) | 188,581 | 5 (0.003%) | 43 ms | 140 ms |
+
+After the kill, the two remaining replicas absorbed the full ~800 RPS. Nginx
+retries failed `GET`s on another replica (`proxy_next_upstream`), so no redirect
+or inspect failed. The 5 failures were `POST /shorten` calls in flight on the
+dying replica. Nginx deliberately doesn't retry `POST`, since replaying a create
+could make a duplicate link.
+
+**Bugs these tests found and fixed:**
+- *Connection pool exhaustion.* Each process had a 10-connection Postgres pool but
+  up to 40 request threads, and psycopg2 raises `PoolError` instead of waiting.
+  An earlier 300-user run held ~900 RPS for 15 s, then collapsed to ~20% failures.
+  A semaphore in `db/database.py` now makes threads wait for a free connection.
+  Same load before/after on a 2-vCPU box: 1,202 failures → 0.
+- *Stale upstream IPs.* Nginx resolves `app1-3` once at startup. After the app
+  containers were rebuilt, it kept dialing old IPs. The runner now recreates Nginx
+  with the stack, and a dead replica is abandoned after 1 s (`proxy_connect_timeout`).
+
+### Analytics batching: Postgres writes per 10,000 clicks
+
+`python bench/batching_writes.py`: 10,000 redirects over 100 links (Zipf-like popularity),
+run once with `ANALYTICS_BATCHING=true` (Redis buffer + 10 s flush worker) and once with it off.
+
+| Mode | UPDATE statements | Rows written | `hit_count` total |
+| --- | --- | --- | --- |
+| Unbatched (write per click) | 10,000 | 10,000 | 10,000 |
+| Batched (Redis + worker) | 2 | 198 | 10,000 |
+
+About **50x fewer row writes** (5,000x fewer statements), with no clicks lost.
+Row count depends on how many flush windows the traffic spans (one row per active link per 10 s).
+At 50 concurrent clients, the unbatched mode also failed 13% of requests from pool
+exhaustion before the fix above, which is the lock/connection pressure batching avoids.
+
+### Edge cache: Cloudflare Worker + KV
+
+`python bench/latency.py`: median of 100 redirects from the laptop (US East), keep-alive HTTPS.
+The origin is the FastAPI stack exposed through a Cloudflare quick tunnel. Every Worker
+request was a KV cache HIT. See [`edge/README.md`](edge/README.md).
+
+| Path | Median | p90 |
+| --- | --- | --- |
+| Origin: Cloudflare → tunnel → Nginx → FastAPI | 75.4 ms | 109.9 ms |
+| Worker, KV hit (origin never contacted) | **29.1 ms** | **32.1 ms** |
+
 
 ## Troubleshooting
 

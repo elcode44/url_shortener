@@ -62,6 +62,13 @@ python ../bench/latency.py --origin https://<tunnel>.trycloudflare.com --worker 
 
 It times 100 redirects against each and prints the medians.
 
+Measured from a laptop in the US East, 100 requests each:
+
+| Path | Median | p90 |
+| --- | --- | --- |
+| Origin (Cloudflare → tunnel → Nginx → FastAPI) | 75.4 ms | 109.9 ms |
+| Worker, KV hit | **29.1 ms** | **32.1 ms** |
+
 ## Local dev
 
 ```powershell
