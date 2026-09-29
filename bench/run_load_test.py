@@ -124,7 +124,8 @@ def main():
     # Nginx resolves app1/app2/app3 to IPs once, at startup. If the app
     # containers were recreated (new build) while Nginx kept running, it keeps
     # sending traffic to stale IPs. Recreate it so it sees the current ones.
-    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "nginx"], cwd=ROOT)
+    # Same env as above, or compose would recreate the apps with rate limiting on.
+    subprocess.run(["docker", "compose", "up", "-d", "--force-recreate", "nginx"], cwd=ROOT, env=env)
     wait_for_stack()
 
     ncpu = sh(["docker", "info", "--format", "{{.NCPU}} CPUs, {{.MemTotal}} bytes"]).stdout.strip()

@@ -36,9 +36,9 @@ class URLShortenerUser(FastHttpUser):
             if resp.status_code == 200:
                 code = resp.json()["short_code"]
                 URLShortenerUser.known_codes.append(code)
-            elif resp.status_code == 429:
-                resp.success()  # rate limiting working as intended, not a failure
             else:
+                # 429 counts as a failure too: the stack must run with
+                # RATE_LIMIT_ENABLED=false, or the numbers mean nothing.
                 resp.failure(f"unexpected status {resp.status_code}")
 
     @task(1)
@@ -56,7 +56,7 @@ class URLShortenerUser(FastHttpUser):
             allow_redirects=False,
             catch_response=True,
         ) as resp:
-            if resp.status_code in (302, 429):
+            if resp.status_code == 302:
                 resp.success()
             else:
                 resp.failure(f"unexpected status {resp.status_code}")
