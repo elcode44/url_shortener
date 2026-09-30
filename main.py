@@ -1,15 +1,14 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from app.routes import router
-from db.database import Database
+from app.routes import router, db as database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Server started — docs at http://localhost:8000/docs")
     yield
-    db.close()
+    database.close()
     print("Server shutting down")
 
 
